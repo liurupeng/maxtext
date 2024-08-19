@@ -451,20 +451,23 @@ def setup_train_loop(config):
     data_iterator:
     state: the initialized train state
   """
+  recorder = create_goodput_recorder(config)
+  recorder.record_tpu_init_start_time()
   init_rng, writer, checkpoint_manager, mesh, model, learning_rate_schedule, tx = setup_mesh_and_model(config)
+  recorder.record_tpu_init_end_time()
+  recorder.record_training_preparation_start_time()
   data_iterator, eval_data_iterator = create_data_iterator(config, mesh)
 
   state, state_mesh_annotations, data_iterator = max_utils.setup_training_state(
       model, data_iterator, tx, config, init_rng, mesh, checkpoint_manager
   )
-
   if config.using_pipeline_parallelism:
     # The vocab tensor(s) of shape [vocab, embed] (and transpose) are not sharded by stage
     params_sharded_tolerance=0.1
   else:
     params_sharded_tolerance=0.02
   maxtext_utils.assert_params_sufficiently_sharded(state.params, mesh, tolerance=params_sharded_tolerance)
-
+  recorder.record_training_preparation_end_time()
   return (
       init_rng,
       writer,
@@ -577,7 +580,9 @@ def train_loop(config, state=None):
       prof.activate()
 
     with jax.profiler.StepTraceAnnotation("train", step_num=step):
+      recorder.record_data_loading_start_time()
       example_batch = load_next_batch(data_iterator, example_batch, config)
+      recorder.record_data_loading_end_time()
       check_example_batch(config, example_batch=example_batch)
       nextrng = jax.jit(jax.random.fold_in)(init_rng, step)
       record_goodput(recorder, config, step=step)
@@ -652,7 +657,8 @@ def main(argv: Sequence[str]) -> None:
       logger_name=logger_name,
       tensorboard_dir=config.tensorboard_dir,
       upload_interval=config.goodput_upload_interval_seconds,
-      monitoring_enabled=True
+      monitoring_enabled=True,
+      include_badput_breakdown=True,
     )
     goodput_monitor.start_goodput_uploader()
     max_logging.log("Started Goodput upload to Tensorboard in the background!")
