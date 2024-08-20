@@ -45,7 +45,7 @@ import max_logging
 import checkpointing
 from generate_param_only_checkpoint import _read_train_checkpoint
 import llama_or_mistral_ckpt
-from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM
+from transformers import LlamaForCausalLM, MistralForCausalLM, AutoModelForCausalLM, AutoTokenizer
 
 
 def unpermute_from_match_maxtext_rope(arr):
@@ -230,6 +230,17 @@ def convert_orbax_hf(hf_model_path, config):
   new_hf_model_params = convert_state_to_hf(training_state, config.model_name)
   print(f"Saving HuggingFace model to path = {hf_model_path}")
   hf_model.save_pretrained(hf_model_path, state_dict=new_hf_model_params)
+
+  # load HF checkpoint to verify if it's correct
+  model_id = "mistralai/Mixtral-8x7B-v0.1"
+  tokenizer = AutoTokenizer.from_pretrained(model_id)
+
+  converted_hf_model = AutoModelForCausalLM.from_pretrained(hf_model_path, device_map="auto")
+  text = "Harry potter is "
+  inputs = tokenizer(text, return_tensors="pt")
+
+  outputs = converted_hf_model.generate(**inputs, max_new_tokens=20)
+  print(tokenizer.decode(outputs[0], skip_special_tokens=True))
 
 
 def main(argv: Sequence[str]):
