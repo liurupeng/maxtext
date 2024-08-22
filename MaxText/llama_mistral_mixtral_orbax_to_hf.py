@@ -260,5 +260,5 @@ if __name__ == "__main__":
 #             base_output_directory=gs://jwyang/maxtext/ \
 #             load_parameters_path=gs://jwyang/maxtext/checkpoint/chained_tests_mixtral-8x7b_stable-2024-08-14-04-00-48/8x7b/scanned_ckpt/0/items \
 #             run_name=orbax_to_hf_conversion model_name=mixtral-8x7b \ 
-#             hardware=gpu \
-#             hf_model_path=/scratch/jwyang-workspace/mixtral-hf/
+#             hf_model_path=/scratch/jwyang-workspace/mixtral-hf/ \
+#             hardware=gpu
