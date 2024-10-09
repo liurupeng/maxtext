@@ -47,10 +47,10 @@ spec:
           - containerPort: 38677
         - name: jax-tpu
           env:
-          image: us-central1-docker.pkg.dev/tpu-vm-gke-testing/multihost/maxtext-disag:v2
+          image: us-central1-docker.pkg.dev/tpu-vm-gke-testing/multihost/maxtext-disag:v5
           args:
-          #- MaxText/configs/v5e/inference/llama2_70b_v5e-16.yml
-          - load_parameters_path=gs://vivianrwu-jetstream-ckpts/maxtext/llama-3-8b/final/bf16/unscanned/0/items
+          - MaxText/configs/v5e/inference/llama2_70b_v5e-16.yml
+          - load_parameters_path=gs://vivianrwu-jetstream-ckpts/maxtext/llama-2-70b/final/bf16/scanned/0/items
           - max_prefill_predict_length=1024
           - max_target_length=2048
           - async_checkpointing=false
@@ -60,7 +60,7 @@ spec:
           - ici_tensor_parallelism=8
           - scan_layers=false
           - weight_dtype=bfloat16
-          - per_device_batch_size=4
+          - per_device_batch_size=1
           - enable_single_controller=true
           imagePullPolicy: Always
           ports: 
