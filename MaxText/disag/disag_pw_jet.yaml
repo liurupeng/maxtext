@@ -56,7 +56,7 @@ spec:
           - async_checkpointing=false
           - steps=1
           - ici_fsdp_parallelism=1
-          - ici_autoregressive_parallelism=2
+          - ici_autoregressive_parallelism=1
           - ici_tensor_parallelism=8
           - scan_layers=false
           - weight_dtype=bfloat16
