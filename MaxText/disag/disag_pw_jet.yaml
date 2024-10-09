@@ -1,0 +1,126 @@
+apiVersion: leaderworkerset.x-k8s.io/v1
+kind: LeaderWorkerSet
+metadata:
+  name: jetstream-disag
+  annotations:
+    leaderworkerset.sigs.k8s.io/exclusive-topology: cloud.google.com/gke-nodepool
+spec:
+  replicas: 1
+  leaderWorkerTemplate:
+    leaderTemplate:
+      metadata:
+        labels: 
+          app: jetstream-disag
+      spec:
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+          cloud.google.com/gke-tpu-topology: 2x4
+        tolerations:
+        - key: "google.com/tpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+        containers:
+        - name: pathways-proxy
+          image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server:latest
+          args:
+          - --resource_manager_address=$(LWS_LEADER_ADDRESS):38677
+          - --server_port=38681
+          - --gcs_scratch_location=gs://rupliu-disag/tmp
+          imagePullPolicy: Always
+          ports:
+          - containerPort: 38681
+        - name: pathways-rm
+          env:       
+          - name: HOST_ADDRESS
+            value: "$(LWS_LEADER_ADDRESS)"
+          - name: TPU_SKIP_MDS_QUERY
+            value: "true"
+          image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+          args:
+          - --server_port=38677
+          - --gcs_scratch_location=gs://rupliu-disag/tmp
+          - --node_type=resource_manager
+          - --instance_count=2
+          - --instance_type=tpuv5e:2x4
+          imagePullPolicy: Always
+          ports:
+          - containerPort: 38677
+        - name: jax-tpu
+          env:
+          image: us-central1-docker.pkg.dev/tpu-vm-gke-testing/multihost/maxtext-disag:v2
+          args:
+          #- MaxText/configs/v5e/inference/llama2_70b_v5e-16.yml
+          - load_parameters_path=gs://vivianrwu-jetstream-ckpts/maxtext/llama-3-8b/final/bf16/unscanned/0/items
+          - max_prefill_predict_length=1024
+          - max_target_length=2048
+          - async_checkpointing=false
+          - steps=1
+          - ici_fsdp_parallelism=1
+          - ici_autoregressive_parallelism=2
+          - ici_tensor_parallelism=8
+          - scan_layers=false
+          - weight_dtype=bfloat16
+          - per_device_batch_size=4
+          - enable_single_controller=true
+          imagePullPolicy: Always
+          ports: 
+          - containerPort: 9000
+          startupProbe:
+            httpGet:
+              path: /healthcheck
+              port: 8000
+              scheme: HTTP
+            periodSeconds: 60
+            initialDelaySeconds: 180
+            failureThreshold: 10
+          livenessProbe:
+            httpGet:
+              path: /healthcheck
+              port: 8000
+              scheme: HTTP
+            periodSeconds: 60
+            failureThreshold: 10
+          readinessProbe:
+            httpGet:
+              path: /healthcheck
+              port: 8000
+              scheme: HTTP
+            periodSeconds: 60
+            failureThreshold: 10
+        - name: jetstream-http
+          image: gcr.io/tpu-vm-gke-testing/maxtext/jetstream-http:latest
+          imagePullPolicy: Always
+          ports:
+          - containerPort: 8000
+    size: 3
+    workerTemplate:
+      spec:
+        nodeSelector:
+          cloud.google.com/gke-tpu-accelerator: tpu-v5-lite-podslice
+          cloud.google.com/gke-tpu-topology: 2x4
+        containers:
+        - name: worker
+          args:
+          - --server_port=38679
+          - --resource_manager_address=$(LWS_LEADER_ADDRESS):38677
+          - --gcs_scratch_location=gs://rupliu-disag/tmp
+          image: us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server:latest
+          imagePullPolicy: Always
+          ports:
+          - containerPort: 38679
+          resources:
+            limits:
+              google.com/tpu: "8"
+--- 
+apiVersion: v1
+kind: Service
+metadata:
+  name: jetstream-svc
+spec:
+  selector:
+    app: jetstream-disag
+  ports:
+  - protocol: TCP
+    name: jetstream-http
+    port: 8000
+    targetPort: 8000
