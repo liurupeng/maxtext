@@ -50,8 +50,8 @@ def get_server_config(config_str: str, config: Any) -> Type[config_lib.ServerCon
         prefill_slices=("v5e-8",),
         generate_slices=("v5e-8",),
         interleaved_slices=(),
-        prefill_engine_create_fns=(functools.partial(create_disag_maxengine, config=config)),
-        generate_engine_create_fns=(functools.partial(create_disag_maxengine, config=config)),
+        prefill_engine_create_fns=(functools.partial(create_disag_maxengine, config=config),),
+        generate_engine_create_fns=(functools.partial(create_disag_maxengine, config=config),),
         interleaved_engine_create_fns=(),
       )
     case _:
