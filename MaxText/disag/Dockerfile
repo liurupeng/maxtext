@@ -16,7 +16,7 @@ ENV JAX_PLATFORMS=proxy
 ENV JAX_BACKEND_TARGET=grpc://localhost:38681
 ENV XCLOUD_ENVIRONMENT=GCP
 
-RUN git clone https://github.com/google/JetStream.git && \
+RUN git clone https://github.com/liurupeng/JetStream.git && \
 git clone https://github.com/liurupeng/maxtext.git
 
 RUN cd /maxtext/ && \
