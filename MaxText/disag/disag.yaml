@@ -47,7 +47,7 @@ spec:
           - containerPort: 38677
         - name: jax-tpu
           env:
-          image: us-central1-docker.pkg.dev/tpu-vm-gke-testing/multihost/maxtext-disag:v5
+          image: us-central1-docker.pkg.dev/tpu-vm-gke-testing/multihost/maxtext-disag:v7
           args:
           - MaxText/configs/v5e/inference/llama2_70b_v5e-16.yml
           - load_parameters_path=gs://vivianrwu-jetstream-ckpts/maxtext/llama-2-70b/final/bf16/scanned/0/items
