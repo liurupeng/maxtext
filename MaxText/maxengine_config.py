@@ -44,7 +44,7 @@ def get_server_config(config_str: str, config: Any) -> Type[config_lib.ServerCon
       )
     case "MaxtextDisaggregatedServer":
       server_config = config_lib.ServerConfig(
-        prefill_slice=("v5e-8"),
+        prefill_slices=("v5e-8"),
         generate_slices=("v5e-8"),
         interleaved_slices=(),
         prefill_engine_create_fns=(functools.partial(create_disag_maxengine, config=config)),
