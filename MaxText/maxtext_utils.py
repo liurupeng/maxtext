@@ -94,7 +94,31 @@ def load_compiled(config, partial_train, state):
 
 def calculate_tokens_training_per_device(config):
   """Calculate training Tokens per device"""
-  return config.max_target_length * config.per_device_batch_size
+  return config.max_target_length * config.per_device_batch_size * config.gradient_accumulation_steps
+
+def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops):
+  """
+  Calculate training TFLOP for Gemma2 as in Gemma2 we combine [local_attention, global_attention] into one decoder
+  layer and we use sliding window attention in local_attention
+  """
+  attention_flops = (
+      # global attention
+      4 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
+      +
+      # local attention
+      4 * config.per_device_batch_size * config.max_target_length * min(config.sliding_window_size, config.max_target_length)
+      * config.num_query_heads * config.head_dim
+  )
+  attention_tflops = (
+      attention_flops * config.num_decoder_layers * 3 / 10**12
+  )
+
+  # multiply num_decoder_layers by 2 because we combine [local_attention, global_attention] into one decoder layer
+  learnable_weight_tflops = (
+      ((total_ffn_flops + qkv_flops + projection_flops) * config.num_decoder_layers * 2 + embedding_flops) * 3 / 10**12
+  )
+
+  return attention_tflops, learnable_weight_tflops
 
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
@@ -139,6 +163,16 @@ def calculate_tflops_training_per_device(config, log=True):
       attention_flops * config.num_decoder_layers * 3 / 10**12
   )
 
+  # override for gemma2 decoder tflop calculation
+  if config.decoder_block == 'gemma2':
+    attention_tflops, learnable_weight_tflops = (
+        calculate_gemma2_tflops_training_per_device(
+            config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops
+        )
+    )
+
+  learnable_weight_tflops = learnable_weight_tflops * config.gradient_accumulation_steps
+  attention_tflops = attention_tflops * config.gradient_accumulation_steps
   total_tflops = learnable_weight_tflops + attention_tflops
 
   if log:
@@ -197,13 +231,13 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance=0.02):
   """
   total_num_params = max_utils.calculate_num_params_from_pytree(params)
   product_num_devices_for_weight_sharding = 1
-  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "stage"]:
+  for axis in ["fsdp", "fsdp_transpose", "sequence", "tensor", "stage", "expert"]:
     product_num_devices_for_weight_sharding *= mesh.shape[axis]
   total_num_params_per_chip = max_utils.calculate_total_params_per_chip(params)
   perfectly_sharded_params_per_chip = total_num_params / product_num_devices_for_weight_sharding
   assert total_num_params_per_chip >= perfectly_sharded_params_per_chip, (
       "Number of parameters per chip must not be less than in the ideal sharded "
-      "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor` axes."
+      "scenario across `fsdp`, `fsdp_transpose`,`sequence`, `tensor`, `expert` axes."
   )
   assert total_num_params_per_chip / perfectly_sharded_params_per_chip - 1 < tolerance, (
       f"Number of unsharded parameters exceeds tolerance {tolerance * 100}% " "of total parameters."
@@ -231,3 +265,23 @@ def apply_gradient_clipping(raw_grads, state, clipping_threshold):
     grads, _ = gradient_clip_transformation.update(raw_grads, state, None)
 
   return grads
+
+def get_nested_value(dictionary, nested_key, default=None):
+  """
+  Retrieves a value from a nested key in a dictionary.
+
+  Args:
+      dictionary: The dictionary to search in.
+      nested_key: A tuple representing the nested key, e.g., ('level1', 'level2', 'key').
+      default: The value to return if the nested key is not found.
+
+  Returns:
+      The value associated with the nested key, or the default value if not found.
+  """
+  current_level = dictionary
+
+  for key in nested_key:
+    if not isinstance(current_level, dict) or key not in current_level:
+      return default
+    current_level = current_level[key]
+  return current_level

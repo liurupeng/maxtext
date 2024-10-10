@@ -100,8 +100,9 @@ def summarize_size_from_pytree(params):
 
 
 def initialize_summary_writer(config):
+  summary_writer_path = os.path.join(config.tensorboard_dir, config.run_name)
   return (
-      writer.SummaryWriter(config.tensorboard_dir)
+      writer.SummaryWriter(summary_writer_path)
       if jax.process_index() == 0
       else None
   )
@@ -211,6 +212,9 @@ def maybe_initialize_jax_distributed_system(raw_keys):
 
   For CPUs, we call jax.distributed.initialize() explicitly, with the specified arguments.
   """
+  if raw_keys["compile_topology"]:
+    # Don't initialize jax distributed with AOT compilation
+    return
   if is_gpu_backend(raw_keys):
     max_logging.log(
         "Attempting to initialize the jax distributed system for GPU backend..."
@@ -387,6 +391,7 @@ def create_device_mesh(config, devices=None):
       config.dcn_fsdp_transpose_parallelism,
       config.dcn_sequence_parallelism,
       config.dcn_tensor_parallelism,
+      config.dcn_expert_parallelism,
       config.dcn_autoregressive_parallelism,
   ]
   ici_parallelism = [
@@ -396,6 +401,7 @@ def create_device_mesh(config, devices=None):
       config.ici_fsdp_transpose_parallelism,
       config.ici_sequence_parallelism,
       config.ici_tensor_parallelism,
+      config.ici_expert_parallelism,
       config.ici_autoregressive_parallelism,
   ]
 
@@ -476,7 +482,7 @@ def init_initial_state(model, tx, config, is_training, key):
 
   Args: model, tx, config, is_training, key
   """
-  input_shape = (config.global_batch_size_to_load, config.max_target_length)
+  input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
   model_vars = model.init(
       {"params": key, "dropout": key, "aqt": key},
       jnp.ones(input_shape, dtype=jnp.int32),
@@ -898,3 +904,10 @@ def print_mem_stats(label:str):
       print(f"\tUsing (GB) {used} / {limit} ({used/limit:%}) on {d}")
   except (RuntimeError, KeyError):
     print("\tMemstats unavailable.")
+
+def print_system_information():
+  """ Print system information of the current environment.
+  Note that this will initialize the JAX backend. """
+  max_logging.log(f"System Information: Jax Version: {jax.__version__}")
+  max_logging.log(f"System Information: Jaxlib Version: {jax.lib.__version__}")
+  max_logging.log(f"System Information: Jax Backend: {jax.lib.xla_bridge.get_backend().platform_version}")

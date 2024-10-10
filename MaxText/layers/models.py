@@ -190,6 +190,10 @@ class Decoder(nn.Module):
       from layers import gemma
 
       return gemma.GemmaDecoderLayer
+    elif self.config.decoder_block == "gemma2":
+      from layers import gemma2
+
+      return gemma2.Gemma2DecoderLayer
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
 
@@ -198,11 +202,15 @@ class Decoder(nn.Module):
       from layers import simple_layer
 
       return simple_layer.SimpleDecoderLayer
+    elif self.config.decoder_block == "simple_mlp":
+      from layers import simple_layer
+
+      return simple_layer.SimpleMlpDecoderLayer
     else:
       raise ValueError(f"Incorrect decoder_block name {self.config.decoder_block=}")
 
   def get_norm_layer(self):
-    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma", "simple"):
+    if self.config.decoder_block in ("default", "llama2", "mistral", "gemma", "gemma2", "simple", "simple_mlp"):
       return RMSNorm
     elif self.config.decoder_block == "gpt3":
       from layers import gpt3
@@ -315,6 +323,10 @@ class Decoder(nn.Module):
                 "context",
             ),
         )
+      elif cfg.remat_policy == "save_out_proj":
+        policy = jax.checkpoint_policies.save_only_these_names(
+            "out_proj",
+        )
       else:
         assert cfg.remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
@@ -375,6 +387,9 @@ class Decoder(nn.Module):
       if self.config.normalize_embedding_logits:
         # Correctly normalize pre-softmax logits for this shared case.
         logits = logits / jnp.sqrt(y.shape[-1])
+      if cfg.final_logits_soft_cap:
+        logits = logits / cfg.final_logits_soft_cap
+        logits = jnp.tanh(logits) * cfg.final_logits_soft_cap
     else:
       logits = linears.DenseGeneral(
           cfg.vocab_size,

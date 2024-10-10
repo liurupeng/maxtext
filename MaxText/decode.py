@@ -12,10 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CLI Utility for Running Inference on a Single Stream"""
+"""CLI utility for running inference on a single stream"""
 
 import jax
 
+import max_utils
 import maxengine
 
 import os
@@ -70,4 +71,5 @@ if __name__ == "__main__":
   pyconfig.initialize(sys.argv)
   cfg = pyconfig.config
   validate_config(cfg)
+  max_utils.print_system_information()
   main(cfg)

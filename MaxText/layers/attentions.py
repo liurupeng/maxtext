@@ -14,6 +14,7 @@
 
 """Attentions Layers."""
 
+import enum
 import functools
 import math
 from typing import Any, Optional
@@ -23,15 +24,21 @@ import jax
 from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import shard_map
-from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_kernel
+from jax.experimental.pallas.ops.tpu.splash_attention import splash_attention_mask
 import jax.numpy as jnp
-
 import common_types
+from kernels.ragged_attention import ragged_gqa
+from kernels.ragged_attention import ragged_mha
 from layers import embeddings
 from layers import initializers
 from layers import linears
 from layers import quantizations
+
+
+class AttentionType(enum.Enum):
+  GLOBAL = "global"
+  LOCAL_SLIDING = "local_sliding"
 
 
 Array = common_types.Array
@@ -66,7 +73,7 @@ CACHE_SCALE_BATCH = common_types.CACHE_SCALE_BATCH
 CACHE_SCALE_SEQUENCE = common_types.CACHE_SCALE_SEQUENCE
 CACHE_SCALE_HEADS = common_types.CACHE_SCALE_HEADS
 CACHE_SCALE_KV = common_types.CACHE_SCALE_KV
-DEFAULT_MASK_VALUE = -0.7 * float(jnp.finfo(jnp.dtype("float32")).max)
+DEFAULT_MASK_VALUE = common_types.DEFAULT_MASK_VALUE
 
 
 nd_dense_init = initializers.nd_dense_init
@@ -122,6 +129,8 @@ class AttentionOp(nn.Module):
   prefill_cache_logical_axis_names: AxisNames = (CACHE_BATCH_PREFILL, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
   cache_logical_axis_names: AxisNames = (CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS, CACHE_KV)
   cache_scale_logical_axis_names: AxisNames = (CACHE_SCALE_BATCH, CACHE_SCALE_SEQUENCE, CACHE_SCALE_HEADS, CACHE_SCALE_KV)
+  ragged_qkv_axis_names: AxisNames = (CACHE_BATCH, CACHE_HEADS, CACHE_SEQUENCE, CACHE_KV)
+  ragged_lengths_names: AxisNames = (CACHE_BATCH,)
   prefill_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
   ar_cache_axis_order: AxisIdxes = (1, 2, 0, 3)
   compute_axis_order: AxisIdxes = (0, 1, 2, 3)
@@ -130,6 +139,11 @@ class AttentionOp(nn.Module):
   dtype: DType = jnp.float32
   quant: Optional[Quant] = None
   kv_quant: Optional[KVQuant] = None
+  attention_type: AttentionType = AttentionType.GLOBAL  # Default to global attention
+  attn_logits_soft_cap: float | None = None
+  sliding_window_size: int | None = None
+  use_ragged_attention: bool = False
+  ragged_block_size: int = 256
 
   def check_attention_inputs(self, query: Array, key: Array| KVTensor, value: Array| KVTensor) -> None:
     """Check attention inputs."""
@@ -161,21 +175,38 @@ class AttentionOp(nn.Module):
       col_ids = jax.lax.broadcasted_iota(jnp.int32, mask_shape, 1)
       causal_mask = (col_ids <= row_ids)[None, None, None, :, :]
 
+    output_mask = None
+
     if (mask is not None) and (causal_mask is not None):
       output_mask = jnp.logical_and(mask, causal_mask)
     elif mask is not None:
       output_mask = mask
     elif causal_mask is not None:
       output_mask = causal_mask
-    else:
-      output_mask = None
+
+    if self.attention_type == AttentionType.LOCAL_SLIDING and output_mask is not None:
+      if self.sliding_window_size is None:
+        raise ValueError(
+            'Sliding_window_size must be set if Local Sliding attention type'
+        )
+
+      all_ones = jnp.ones_like(output_mask)
+      sliding_mask = jnp.triu(
+          all_ones, -1 * self.sliding_window_size + 1
+      ) * jnp.tril(all_ones, self.sliding_window_size - 1)
+      output_mask = sliding_mask * output_mask
 
     return jnp.where(output_mask, 0.0, DEFAULT_MASK_VALUE) if output_mask is not None else None
 
-  def apply_attention(self, query: Array, key: Array| KVTensor, value: Array| KVTensor, decoder_segment_ids: Array | None, model_mode: str):
+  def apply_attention(self, query: Array, key: Array | KVTensor, value: Array | KVTensor, decoder_segment_ids: Array | None, lengths: Array | None, model_mode: str, use_ragged_attention: bool = False):
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
-    if (
+    if use_ragged_attention and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
+      if lengths is None:
+        lengths = jnp.sum(decoder_segment_ids, axis=-1)
+
+      return self.ragged_attention(query, key, value, lengths, self.ragged_block_size)
+    elif (
         self.attention_kernel == "dot_product"
         or (self.attention_kernel == "autoselected" and model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE)
         or (self.attention_kernel == "autoselected" and length < 128)
@@ -192,7 +223,7 @@ class AttentionOp(nn.Module):
             """Decode not supported with flash attention.
                             Use `dot_product` instead."""
         )
-      return self.tpu_flash_attention(query, key, value, decoder_segment_ids), None, None
+      return self.tpu_flash_attention(query, key, value, decoder_segment_ids, self.attn_logits_soft_cap), None, None
     elif self.attention_kernel == "cudnn_flash_te":
       if isinstance(key, KVTensor):
         key = key.dequant()
@@ -207,7 +238,35 @@ class AttentionOp(nn.Module):
     else:
       raise ValueError(f"Unexpected attention kernel {self.attention_kernel=}.")
 
-  def tpu_flash_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None) -> Array:
+  
+  def ragged_attention(self, query: Array, key: Array | KVTensor, value: Array | KVTensor, lengths: Array, block_size: int) -> tuple[Array, Array, Array]:
+    """Ragged Attention."""
+    if isinstance(query, KVTensor) or isinstance(query, KVTensor):
+      raise TypeError("Ragged attention does not currently support quantized tensors.")
+    b = nn.logical_to_mesh_axes(self.ragged_lengths_names)
+    bsnd = nn.logical_to_mesh_axes(self.cache_logical_axis_names)
+    @functools.partial(
+        shard_map,
+        mesh=self.mesh,
+        in_specs=(
+            bsnd,
+            bsnd,
+            bsnd,
+            b,
+            None,
+        ),
+        out_specs=bsnd,
+        check_rep=False,
+    )
+    def wrap_ragged_attention(query, key, value, lengths, block_size):
+      if query.shape[-2] == key.shape[-2]:
+        return ragged_mha(query, key, value, lengths, block_size=block_size)
+      else:
+        return ragged_gqa(query, key, value, lengths, block_size=block_size)
+
+    return wrap_ragged_attention(query, key, value, lengths, block_size)
+
+  def tpu_flash_attention(self, query: Array, key: Array, value: Array, decoder_segment_ids: Array | None, attn_logits_soft_cap: float | None = None) -> Array:
     """TPU Flash Attention."""
     # Transpose to ('batch', 'heads', 'length', 'kv')
     query = jnp.transpose(query, axes=(0, 2, 1, 3))
@@ -247,10 +306,24 @@ class AttentionOp(nn.Module):
           block_kv_dq=min(512, query.shape[2]),
       )
 
-      masks = [splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2])) for i in range(query.shape[1])]
-      multi_head_mask = splash_attention_mask.MultiHeadMask(masks=masks)
+      mask = splash_attention_mask.CausalMask(shape=(query.shape[2], query.shape[2]))
+
+      # Apply local masking if local sliding attention is enabled.
+      if self.attention_type == AttentionType.LOCAL_SLIDING:
+        if self.sliding_window_size is None:
+          raise ValueError(
+              'Sliding_window_size must be set if Local Sliding attention type'
+          )
+        mask &= splash_attention_mask.LocalMask(
+            shape=(query.shape[2], query.shape[2]),
+            window_size=(self.sliding_window_size, self.sliding_window_size),
+            offset=0,
+        )
+
+      # Create multi-head mask
+      multi_head_mask = splash_attention_mask.MultiHeadMask(masks=(mask,) *  query.shape[1])
       splash_kernel = splash_attention_kernel.make_splash_mha(
-          mask=multi_head_mask, head_shards=1, q_seq_shards=1, block_sizes=block_sizes
+          mask=multi_head_mask, head_shards=1, q_seq_shards=1, block_sizes=block_sizes, attn_logits_soft_cap=attn_logits_soft_cap,
       )
 
       return jax.vmap(splash_kernel)(query, key, value, segment_ids=decoder_segment_ids)
@@ -353,6 +426,10 @@ class AttentionOp(nn.Module):
 
     q_seq_len = query.shape[1]
     attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
+
+    if self.attn_logits_soft_cap:
+      attn_weights = jnp.tanh(attn_weights / self.attn_logits_soft_cap)
+      attn_weights = attn_weights * self.attn_logits_soft_cap
 
     # Casting softmaxt computation for float32 for model stability.
     if model_mode == common_types.MODEL_MODE_TRAIN and self.float32_logits:
@@ -563,6 +640,14 @@ class AttentionOp(nn.Module):
         jnp.int32,
     )
 
+    cached_lengths_var = self.variable(
+        "cache",
+        "cached_ar_lengths",
+        nn.with_logical_partitioning(jnp.zeros, (CACHE_BATCH, )),
+        (cache_logical_shape[0], ),
+        jnp.int32,
+    )
+
     if self.kv_quant:
       cache_scale_logical_shape = self._get_cache_scale_logical_shape(batch, heads)
       cache_scale_axis_names = self.transpose_tuple(self.cache_scale_logical_axis_names, self.ar_cache_axis_order)
@@ -590,7 +675,7 @@ class AttentionOp(nn.Module):
       "cache", "cache_ar_index", nn.with_logical_partitioning(jnp.zeros, ()), (1,), jnp.int32)
     key_vars = (cached_key_var, cached_key_scale_var)
     value_vars = (cached_value_var, cached_value_scale_var)
-    return key_vars, value_vars, cached_segment_id_var, cache_index_var
+    return key_vars, value_vars, cached_segment_id_var, cache_index_var, cached_lengths_var
 
   def kv_cache_prefill(
       self,
@@ -644,6 +729,8 @@ class AttentionOp(nn.Module):
       cached_key_vars: tuple[nn.Variable, nn.Variable | None],
       cached_value_vars: tuple[nn.Variable, nn.Variable | None],
       one_hot_indices: Array,
+      lengths: Array,
+      use_ragged_attention: bool,
   ) -> None:
     """Adds a single token's results to the ar kv cache
 
@@ -673,16 +760,41 @@ class AttentionOp(nn.Module):
       one_token_value_shaped_for_cache, one_token_value_scale_shaped_for_cache = self.kv_quant.quantize(
         one_token_value_shaped_for_cache, ar_cache_axis_names)
 
-    one_hot_indices = one_hot_indices.astype(int)
-    ar_cache_update_idx = jnp.squeeze(one_hot_indices)
 
-    ar_cache_update_axis = ar_cache_axis_names.index(CACHE_SEQUENCE)
-    cached_key_var.value = jax.lax.dynamic_update_index_in_dim(
-      cached_key_var.value, one_token_key_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis)
+    ar_cache_update_idx = jnp.squeeze(one_hot_indices)
+    ar_cache_sequence_axis = ar_cache_update_axis = ar_cache_axis_names.index(CACHE_SEQUENCE)
+    ar_cache_batch_axis = ar_cache_axis_names.index(CACHE_BATCH)
+
+    if use_ragged_attention:
+      cache_locations = [slice(None)] * 4 
+      new_token_locations = [slice(None)] * 4
+      new_token_locations[ar_cache_sequence_axis] = 0 
+
+      def key_body(i, val):
+        cache_locations[ar_cache_batch_axis] = i
+        cache_locations[ar_cache_sequence_axis] = lengths[i]
+        new_token_locations[ar_cache_batch_axis] = i
+        return val.at[tuple(cache_locations)].set(one_token_key_shaped_for_cache[tuple(new_token_locations)])
+
+      def value_body(i, val):
+        cache_locations[ar_cache_batch_axis] = i
+        cache_locations[ar_cache_sequence_axis] = lengths[i]
+        new_token_locations[ar_cache_batch_axis] = i
+        return val.at[tuple(cache_locations)].set(one_token_value_shaped_for_cache[tuple(new_token_locations)])
+
+      cached_key_var.value = jax.lax.fori_loop(0, one_token_key_shaped_for_cache.shape[0], key_body, cached_key_var.value, unroll=8)
+      cached_value_var.value = jax.lax.fori_loop(0, one_token_value_shaped_for_cache.shape[0], value_body, cached_value_var.value, unroll=8)
+
+    else: 
+      one_hot_indices = one_hot_indices.astype(int)
+      cached_key_var.value = jax.lax.dynamic_update_index_in_dim(
+        cached_key_var.value, one_token_key_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis)
+      cached_value_var.value = jax.lax.dynamic_update_index_in_dim(
+        cached_value_var.value, one_token_value_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis)
+
     cached_key_var.value = nn.with_logical_constraint(cached_key_var.value, ar_cache_axis_names)
-    cached_value_var.value = jax.lax.dynamic_update_index_in_dim(
-      cached_value_var.value, one_token_value_shaped_for_cache, ar_cache_update_idx, ar_cache_update_axis)
     cached_value_var.value = nn.with_logical_constraint(cached_value_var.value, ar_cache_axis_names)
+    
 
     if self.kv_quant:
       ar_cache_scale_axis_names = self.transpose_tuple(self.cache_scale_logical_axis_names, self.ar_cache_axis_order)
@@ -718,6 +830,7 @@ class AttentionOp(nn.Module):
       self,
       key: Array,
       value: Array,
+      use_ragged_attention: bool = False,
   ):
     """In autoregressive mode, we update the cache for this entry and
        then return the full cache.
@@ -738,12 +851,13 @@ class AttentionOp(nn.Module):
 
     cached_ar_key_vars, cached_ar_value_vars, cached_ar_segment_id_var, cache_ar_index_var = self._get_ar_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE)
 
-    self.update_ar_key_value(key, value, cached_ar_key_vars, cached_ar_value_vars, cache_ar_index_var.value)
+    self.update_ar_key_value(key, value, cached_ar_key_vars, cached_ar_value_vars, cache_ar_index_var.value, cache_ar_lengths_var.value, use_ragged_attention)
     active_indicator = jnp.zeros((batch, 1), dtype=jnp.int32) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
     cached_ar_segment_id_var.value = jax.lax.dynamic_update_index_in_dim(
         cached_ar_segment_id_var.value, active_indicator, jnp.squeeze(cache_ar_index_var.value), 1
     )
     cache_ar_index_var.value = jnp.mod(cache_ar_index_var.value + 1, self.max_target_length - self.max_prefill_predict_length)
+    cache_ar_lengths_var.value = cache_ar_lengths_var.value.at[:].add(1)
 
     # The below retrieves the existing prefill cache variables, not creating new ones
     cached_prefill_key_vars, cached_prefill_value_vars, cached_prefill_segment_id_var = self._get_prefill_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE)
@@ -758,10 +872,11 @@ class AttentionOp(nn.Module):
         self.get_cached_values(cached_ar_key_vars, key.dtype, self.ar_cache_axis_order),
         self.get_cached_values(cached_ar_value_vars, value.dtype, self.ar_cache_axis_order),
         cached_ar_segment_id_var.value,
+        cache_ar_lengths_var.value
     )
     return cached_prefill, cached_ar
 
-  def kv_cache(self, key: Array, value: Array, decoder_segment_ids: Array, model_mode: str) -> tuple:
+  def kv_cache(self, key: Array, value: Array, decoder_segment_ids: Array, model_mode: str, use_ragged_attention: bool = False) -> tuple:
     """KV cache takes the current state and updates the state accordingly.
 
     The key and value have dimension [b, s, n_kv, d],
@@ -787,7 +902,7 @@ class AttentionOp(nn.Module):
     elif model_mode == common_types.MODEL_MODE_PREFILL:
       return self.kv_cache_prefill(key, value, decoder_segment_ids), None
     elif model_mode == common_types.MODEL_MODE_AUTOREGRESSIVE:
-      return self.kv_cache_autoregressive(key, value)
+      return self.kv_cache_autoregressive(key, value, use_ragged_attention)
     else:
       raise ValueError(f"Model Mode isn't supported! {model_mode=}")
 
@@ -816,14 +931,16 @@ class AttentionOp(nn.Module):
 
   @nn.compact
   def __call__(self, query, key, value, decoder_segment_ids, model_mode):
-    prefill_kv_cache, ar_kv_cache = self.kv_cache(key, value, decoder_segment_ids, model_mode)
+    prefill_kv_cache, ar_kv_cache = self.kv_cache(key, value, decoder_segment_ids, model_mode, use_ragged_attention=self.use_ragged_attention)
 
     prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
         query=query,
         key=prefill_kv_cache[0],
         value=prefill_kv_cache[1],
         decoder_segment_ids=prefill_kv_cache[2],
+        lengths=None,
         model_mode=model_mode,
+        use_ragged_attention=self.use_ragged_attention,
     )
 
     # Return the "prefill" cache if it actually the combined prefill+ar kv cache
@@ -837,13 +954,18 @@ class AttentionOp(nn.Module):
         key=ar_kv_cache[0],
         value=ar_kv_cache[1],
         decoder_segment_ids=ar_kv_cache[2],
+        lengths=ar_kv_cache[3],
         model_mode=model_mode,
+        use_ragged_attention=self.use_ragged_attention,
     )
 
-    unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
-    exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
-    exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
-    return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
+    if ar_unnormalized_output is not None:
+      unnormalized_outputs = [prefill_unnormalized_output, ar_unnormalized_output]
+      exponentials_maxes = [prefill_exponentials_max, ar_exponentials_max]
+      exponentials_sums = [prefill_exponentials_sum, ar_exponentials_sum]
+      return self.normalize_attention(unnormalized_outputs, exponentials_maxes, exponentials_sums)
+    else:
+      return prefill_unnormalized_output / prefill_exponentials_sum
 
 
 class Attention(nn.Module):
@@ -886,6 +1008,12 @@ class Attention(nn.Module):
   float32_logits: bool = False  # cast logits in float32 for stability.
   quant: Optional[Quant] = None
   kv_quant: Optional[KVQuant] = None
+
+  attention_type: AttentionType = AttentionType.GLOBAL  # Default to global attention
+  attn_logits_soft_cap: float | None = None
+  sliding_window_size: int | None = None
+  use_ragged_attention: bool = False
+  ragged_block_size: int = 256
 
   # Shard the query activation as the same as the key and value.
   # TODO: Find a better sharding axis name.
@@ -1071,6 +1199,11 @@ class Attention(nn.Module):
         ar_cache_axis_order=self.ar_cache_axis_order,
         compute_axis_order=self.compute_axis_order,
         reshape_q=self.reshape_q,
+        attention_type=self.attention_type,
+        attn_logits_soft_cap=self.attn_logits_soft_cap,
+        sliding_window_size=self.sliding_window_size,
+        use_ragged_attention=self.use_ragged_attention,
+        ragged_block_size=self.ragged_block_size,
     )
 
     out = attention_op(query, key, value, decoder_segment_ids, model_mode)
