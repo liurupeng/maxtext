@@ -29,6 +29,7 @@ def create_maxengine(devices: config_lib.Devices, config: Any) -> engine_api.Eng
   return maxengine.MaxEngine(config)
 
 def create_disag_maxengine(devices: config_lib.Devices, config: Any) -> engine_api.Engine:
+  logging.info("devices are %s", devices)
   return maxengine.MaxEngine(config=config, devices=devices)
 
 def get_server_config(config_str: str, config: Any) -> Type[config_lib.ServerConfig]:

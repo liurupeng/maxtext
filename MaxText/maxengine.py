@@ -15,6 +15,7 @@
 """Implementation of Engine API for MaxText"""
 import functools
 from typing import Any, Optional, Tuple
+from venv import logger
 
 import flax
 from flax import linen as nn
@@ -65,6 +66,7 @@ class MaxEngine(engine_api.Engine):
     self.rng = jax.random.PRNGKey(0)
 
     # Mesh definition
+    logger.info("init devices are %s", devices)
     devices_array = max_utils.create_device_mesh(config=config, devices=devices)
     self._mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 

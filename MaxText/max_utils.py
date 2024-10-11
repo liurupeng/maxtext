@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 """ Common Max Utils needed by multiple modules"""
+from venv import logger
 import checkpointing
 import common_types
 import functools
@@ -382,6 +383,7 @@ def create_device_mesh(config, devices=None):
   num_slices = config.num_slices
   num_devices_per_slice = num_devices // num_slices
 
+  logger.info("num_devices %s; num_slices %s; num_devices_per_slice %s", num_devices, num_slices, num_devices_per_slice)
   multi_slice_env = num_slices > 1
 
   dcn_parallelism = [
@@ -405,6 +407,7 @@ def create_device_mesh(config, devices=None):
       config.ici_autoregressive_parallelism,
   ]
 
+  logger.info("ici_parallelism %s", ici_parallelism)
   # Find possible unspecified parallelisms
   ici_parallelism = fill_unspecified_mesh_axes(
       ici_parallelism, num_devices_per_slice, "ICI"
