@@ -16,6 +16,7 @@
 
 import enum
 import functools
+import logging
 import math
 from typing import Any, Optional
 
@@ -599,6 +600,7 @@ class AttentionOp(nn.Module):
     cache_length = self.max_target_length - self.max_prefill_predict_length
     cache_logical_shape = (batch, cache_length, heads, kv_head_size)
 
+    logging.info("_get_ar_cache_vars dtype %s, cache_length %s, cache_logical_shape %s", dtype, cache_length, cache_logical_shape)
     if model_mode == common_types.MODEL_MODE_PREFILL:
       cache_logical_axis_names = self.prefill_cache_logical_axis_names
     else:
@@ -606,7 +608,7 @@ class AttentionOp(nn.Module):
 
     cache_axis_names = self.transpose_tuple(cache_logical_axis_names, self.ar_cache_axis_order)
     cache_shape = self.transpose_tuple(cache_logical_shape, self.ar_cache_axis_order)
-
+    logging.info("_get_ar_cache_vars cache_axis_names %s, cache_shape %s", cache_axis_names, cache_shape)
     # TODO(b/339703100): investigate the issue why with_logical_partitioning doesn't enforce sharding
     cached_key_var = self.variable(
         "cache",
@@ -648,6 +650,7 @@ class AttentionOp(nn.Module):
         jnp.int32,
     )
 
+    logging.info("cached_key_var %s, cached_value_var %s, cached_segment_id_var %s, cached_lengths_var %s", cached_key_var, cached_value_var, cached_segment_id_var, cached_lengths_var)
     if self.kv_quant:
       cache_scale_logical_shape = self._get_cache_scale_logical_shape(batch, heads)
       cache_scale_axis_names = self.transpose_tuple(self.cache_scale_logical_axis_names, self.ar_cache_axis_order)
@@ -675,6 +678,7 @@ class AttentionOp(nn.Module):
       "cache", "cache_ar_index", nn.with_logical_partitioning(jnp.zeros, ()), (1,), jnp.int32)
     key_vars = (cached_key_var, cached_key_scale_var)
     value_vars = (cached_value_var, cached_value_scale_var)
+    logging.info("key_vars %s, value_vars %s, cached_segment_id_var %s, cached_lengths_var %s", key_vars, value_vars, cached_segment_id_var, cache_index_var, cached_lengths_var)
     return key_vars, value_vars, cached_segment_id_var, cache_index_var, cached_lengths_var
 
   def kv_cache_prefill(
@@ -849,7 +853,7 @@ class AttentionOp(nn.Module):
     if sequence != 1:
       raise ValueError(f"Sequence length should be 1 during autoregression, got {sequence=}")
 
-    cached_ar_key_vars, cached_ar_value_vars, cached_ar_segment_id_var, cache_ar_index_var = self._get_ar_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE)
+    cached_ar_key_vars, cached_ar_value_vars, cached_ar_segment_id_var, cache_ar_index_var, test = self._get_ar_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE)
 
     self.update_ar_key_value(key, value, cached_ar_key_vars, cached_ar_value_vars, cache_ar_index_var.value, cache_ar_lengths_var.value, use_ragged_attention)
     active_indicator = jnp.zeros((batch, 1), dtype=jnp.int32) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR

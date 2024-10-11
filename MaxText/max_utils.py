@@ -15,6 +15,7 @@ limitations under the License.
 """
 
 """ Common Max Utils needed by multiple modules"""
+import logging
 from venv import logger
 import checkpointing
 import common_types
