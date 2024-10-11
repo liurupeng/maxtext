@@ -375,13 +375,15 @@ def fill_unspecified_mesh_axes(
   return parallelism_vals
 
 
-def create_device_mesh(config, devices=None):
+def create_device_mesh(config, devices=None, is_disag=False):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
   if devices is None:
     devices = jax.devices()
   num_devices = len(devices)
   num_slices = config.num_slices
   num_devices_per_slice = num_devices // num_slices
+  if is_disag:
+    num_devices_per_slice = num_devices
 
   logger.info("num_devices %s; num_slices %s; num_devices_per_slice %s", num_devices, num_slices, num_devices_per_slice)
   multi_slice_env = num_slices > 1

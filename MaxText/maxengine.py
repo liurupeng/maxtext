@@ -61,13 +61,13 @@ class MaxEngine(engine_api.Engine):
   JetStream efficient serving infrastructure.
   """
 
-  def __init__(self, config: Any, devices: config_lib.Devices | None = None):
+  def __init__(self, config: Any, devices=None, is_disag=False):
     self.config = config
     self.rng = jax.random.PRNGKey(0)
 
     # Mesh definition
     logger.info("init devices are %s", devices)
-    devices_array = max_utils.create_device_mesh(config=config, devices=devices)
+    devices_array = max_utils.create_device_mesh(config=config, devices=devices, is_disag=is_disag)
     self._mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
     # Model and Optimizer definition
