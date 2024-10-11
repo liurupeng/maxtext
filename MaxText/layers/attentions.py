@@ -853,7 +853,7 @@ class AttentionOp(nn.Module):
     if sequence != 1:
       raise ValueError(f"Sequence length should be 1 during autoregression, got {sequence=}")
 
-    cached_ar_key_vars, cached_ar_value_vars, cached_ar_segment_id_var, cache_ar_index_var, test = self._get_ar_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE)
+    cached_ar_key_vars, cached_ar_value_vars, cached_ar_segment_id_var, cache_ar_index_var, cache_ar_lengths_var = self._get_ar_cache_vars(batch, heads, kv_head_size, common_types.MODEL_MODE_AUTOREGRESSIVE)
 
     self.update_ar_key_value(key, value, cached_ar_key_vars, cached_ar_value_vars, cache_ar_index_var.value, cache_ar_lengths_var.value, use_ragged_attention)
     active_indicator = jnp.zeros((batch, 1), dtype=jnp.int32) + common_types.DECODING_ACTIVE_SEQUENCE_INDICATOR
