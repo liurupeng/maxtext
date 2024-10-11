@@ -35,7 +35,7 @@ def create_disag_maxengine(devices: config_lib.Devices, config: Any) -> engine_a
 def get_server_config(config_str: str, config: Any) -> Type[config_lib.ServerConfig]:
   """Gets the Server Config Required by JetStream"""
   logging.info("local tpu device count %s", str(jax.device_count()))
-  
+  logging.info("current config %s", config)
   match config_str:
     case "MaxtextInterleavedServer":
       server_config = config_lib.ServerConfig(

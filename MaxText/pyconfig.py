@@ -21,6 +21,7 @@ import math
 import os
 import sys
 from typing import Any, Union
+from venv import logger
 
 import jax
 from jax.experimental.compilation_cache import compilation_cache
@@ -515,9 +516,11 @@ def get_num_slices(raw_keys):
     max_logging.log(" Setting num_slices=1 for CPU hardware type")
     return 1
   if int(raw_keys["compile_topology_num_slices"]) > 0:
+    logger.info("compile_topology_num_slices %s", raw_keys["compile_topology_num_slices"])
     return raw_keys["compile_topology_num_slices"]
   else:
     devices = jax.devices()
+    logger.info("get_num_slices %s", devices)
     try:
       return 1 + max([d.slice_index for d in devices])
     except:
