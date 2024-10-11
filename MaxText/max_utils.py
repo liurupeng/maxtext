@@ -386,7 +386,7 @@ def create_device_mesh(config, devices=None, is_disag=False):
     num_devices_per_slice = num_devices
 
   logger.info("num_devices %s; num_slices %s; num_devices_per_slice %s", num_devices, num_slices, num_devices_per_slice)
-  multi_slice_env = num_slices > 1
+  multi_slice_env = False
 
   dcn_parallelism = [
       config.dcn_data_parallelism,
